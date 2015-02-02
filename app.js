@@ -27,8 +27,8 @@ var bwconnection = {
 	subscriptionId: '',
 	subscriptionUpdateIntervalId: '',
 	callhalf: '',
-	groupadmin: 'provtestpbxl@pbxl',
-	groupadminpassword: '6a8prG28tv!',
+	groupadmin: '',
+	groupadminpassword: ''
 	serviceprovider: 'PBXL%20Inc.',
 };
 

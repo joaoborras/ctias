@@ -8,13 +8,13 @@ inserted to indicate it is the zd compatilibity branch.
 var credentials = [{
 	username: '',
 	password: '',
-	appId: '',//for SFDC, appId is the "res" object
+	appId: '',//for SFDC, appId is the "res" object and for ZD, it is the ZD app ID
 	callhalf: '',
 	subscriptionId: '',
+	zddomain: '', //only for ZD clients
 }];
 
 //this array stores all the BW groups from all clients. A subscription must be opened for each one
-var BW_groups = ['PBXL_Test',];
 var shuttingdown = false;
 
 //this object stores data related to BW for each ZD's app. These data are unique to the application
@@ -156,11 +156,12 @@ app.all('/heartbeat/', function(req, res){
 	res.send();
  });
 
+//this api must be called by all clients(SFDC and ZD for now)
 app.all("/log_in/", function(req, res){
-	//console.log("/log_in/ received " + req.query);
-	////console.log('Logging In: username: ' + req.param('username'));
 	log.info("Logging In: username: " + req.param('username') + 
-		     " / password: " + req.param('password') + '\r\n');
+		     " / password: " + req.param('password') + 
+		     " / appId: " req.param('appid') + 
+		     " / zddomain: " + req.param('zddomain') +'\r\n');
 	res.set('Content-Type', 'text/plain');
 	verifyUser(req.param('username'), req.param('password'), function(result){
 		if( result == true){
@@ -172,12 +173,20 @@ app.all("/log_in/", function(req, res){
 				}
 			}
 			if(!hasuser){
-				//console.log('user still not in credentials. Will add it...');
+				//user still not in credentials. Will add it.
+				//if the client is ZD, then store appId and zddomain in the user's credentials
+				var appid = '';
+				var zddomain = '';
+				if(req.param('appid')){
+					appid = req.param('appid');
+					zddomain = req.param('zddomain');
+				}
 				credentials.push({
 					username: req.param('username'),
 					password: req.param('password'),
-					appId: '',
+					appId: appid,
 					callhalf: '',
+					zddomain: zddomain,
 				});
 			}
 			//console.log('Logged in users: ' + '\r\n');
@@ -196,31 +205,32 @@ app.all("/log_in/", function(req, res){
 app.all("/log_out/", function(req, res){
 	//console.log("/log_out/ called from user " + req.param('username'));
 	log.info('<- /log_out/ called from user ' + req.param('username'));
+	//look to see if the user is loggedin before delete. If found, then delete his credentials object
 	for(var index in credentials){
 		if(credentials[index].username === req.param('username')){
-			//console.log("found user " + req.param('username') + " in credentials and will now delete it");
-			res.status(200);
-			var responseobj = credentials[index].appId;
-			var logoutresponse = '<Event>';
-			logoutresponse += '<eventtype>LogOutResponse</eventtype>';
-			logoutresponse += '</Event>';
-			responseobj.write(logoutresponse);
-			credentials.splice(index, 1);
+			//check if the client is ZenDesk
+			if(req.param('zddomain')){//is ZD client
+				//call zd event
+			}else{//is SFDC client
+				res.status(200);
+				var responseobj = credentials[index].appId;
+				var logoutresponse = '<Event>';
+				logoutresponse += '<eventtype>LogOutResponse</eventtype>';
+				logoutresponse += '</Event>';
+				responseobj.write(logoutresponse);
+				credentials.splice(index, 1);
+			}
 			break;
 		}else{
 			res.status(404);
 		}
 	}
-	//console.log('Logged in users: ' + '\r\n');
-	for(var x in credentials){
-		//console.log('Username: ' + credentials[x].username + '\r\n');
-	}
 	res.send();
 });
 
+//the /connect entry point is called only from SFDC clients. ZD clients does not call this api
 app.all("/connect/", function(req, res){
 	var username = req.param('username');
-	//console.log("<- /connect/ called from user " + username);
 	log.info('<- /connect/ called from user ' + username);
 	for(var index in credentials){
 		if(credentials[index].username == username){
@@ -431,14 +441,12 @@ getCallHistoryForUser = function(response, username, calllogtype){
 }
 
 requestChannel = function(){
-	//console.log("-> INFO: requestChannel");
 	var options = {
 		host: BW_URL,
 		port: XSPPORT,
 		path: "/com.broadsoft.async/com.broadsoft.xsi-events/v2.0/channel",
 		method: 'POST',
 		auth: bwconnection.groupadmin + ':' + bwconnection.groupadminpassword,
-		//auth: 'BWS_Test.zentestuser2@pbxl.net:t1Ew694c2x',
 		headers: {'Content-Type': 'text/xml'}
 	};
 	var req = http.request(options, function(res){//daqui
@@ -458,13 +466,9 @@ requestChannel = function(){
 					}
 		    	});
 				res.on('error', function(e){
-					//console.log("Error on requestChannel. Status is " + e.status);
-					//console.log("Error message: " + e.message);
-					//console.log("Will try again...");
 					requestChannel();
 				});
 				res.on('close', function(e){
-					//console.log("ERROR: Main connection closed.");
 					log.error("Main connection closed.");
 				});
 				break;
@@ -473,13 +477,10 @@ requestChannel = function(){
 			case 403:
 			case 404:
 				deleteChannel(function(){
-					//console.log("Channel deleted!");
 				});
 				break;
 			default:
-				//console.log("Error in requestChannel. Response status is " + res.statusCode);
 				log.error("<- response from BW: " + res.statusCode + '\r\n');
-				//console.log("Will try again in 5 secs...");
 				log.info("Will try again in 5 secs...");
 				setTimeout(function(){
 					requestChannel();
@@ -1368,6 +1369,154 @@ retrieveCall = function(username, callid){
 
 	req.end();
 	log.info('-> PUT ' + BW_URL + "/com.broadsoft.xsi-actions/v2.0/user/" + username + "/calls/" + callid + "/Reconnect" + '\r\n');
+};
+
+//************************* ZD notifications ************************
+sendCallReceivedToZdApp = function(zddomain, appid, callerid, callback){
+	console.log("INFO: sendCallReceivedToZdApp called");
+	console.log("zddomain: " + zddomain + "appid: " + appid + "callerid: " + callerid + "callback: " + callback);
+
+	var options = {
+	  host: zddomain,
+	  path: '/api/v2/apps/notify.json/',
+	  method: 'POST',
+	  auth: 'joaopaulo.borras@pbxl.jp:zendesktest', //TODO: real auth with ZD?
+	  headers: {'Content-Type': 'application/json'},
+	};
+	var https = require('https');
+	var req = https.request(options, function(res) {
+	  log.info("< response from ZD: " + res.statusCode + '\r\n');
+	});
+
+	req.on('error', function(e) {
+  		log.info('problem with POST to ZD: ' + e.message + '\r\n');
+	});
+	var data = '{"app_id":"' + appid + '","event":"' + callback + '","body":"' + callerid + '"}';
+	req.write(data);
+	req.end();
+	log.info('> POST to ZD \r\n');
+};
+
+sendCallAnsweredToZdApp = function(zddomain, appid, callerid, callback){
+	console.log("INFO: sendCallAnsweredToZdApp called");
+
+	var options = {
+	  host: zddomain,
+	  path: '/api/v2/apps/notify.json/',
+	  method: 'POST',
+	  auth: 'joaopaulo.borras@pbxl.jp:zendesktest', //TODO: real auth with ZD?
+	  headers: {'Content-Type': 'application/json'},
+	};
+	var https = require('https');
+	var req = https.request(options, function(res) {
+	  log.info("< response from ZD: " + res.statusCode + '\r\n');
+	});
+
+	req.on('error', function(e) {
+  		log.info('problem with POST to ZD: ' + e.message + '\r\n');
+	});
+	var data = '{"app_id":"' + appid + '","event":"' + callback + '","body":"' + callerid + '"}';
+	req.write(data);
+	req.end();
+	log.info('> POST to ZD \r\n');
+};
+
+sendCallReleasedToZdApp = function(zddomain, appid, callback){
+	console.log("INFO: sendCallReleasedToZdApp called");
+
+	var options = {
+	  host: zddomain,
+	  path: '/api/v2/apps/notify.json/',
+	  method: 'POST',
+	  auth: 'joaopaulo.borras@pbxl.jp:zendesktest', //TODO: real auth with ZD?
+	  headers: {'Content-Type': 'application/json'},
+	};
+	var https = require('https');
+	var req = https.request(options, function(res) {
+	  log.info("< response from ZD: " + res.statusCode + '\r\n');
+	});
+
+	req.on('error', function(e) {
+  		log.info('problem with POST to ZD: ' + e.message + '\r\n');
+	});
+	var data = '{"app_id":"' + appid + '","event":"' + callback + '"}';
+	req.write(data);
+	req.end();
+	log.info('> POST to ZD \r\n');
+};
+
+sendCallRedirectedToZdApp = function(zddomain, appid, callback){
+	console.log("INFO: sendCallRedirectedToZdApp called. callback is " + callback + " and zddomain is " + zddomain);
+
+	var options = {
+	  host: zddomain,
+	  path: '/api/v2/apps/notify.json/',
+	  method: 'POST',
+	  auth: 'joaopaulo.borras@pbxl.jp:zendesktest', //TODO: real auth with ZD?
+	  headers: {'Content-Type': 'application/json'},
+	};
+	var https = require('https');
+	var req = https.request(options, function(res) {
+	  log.info("< response from ZD: " + res.statusCode + '\r\n');
+	});
+
+	req.on('error', function(e) {
+  		log.info('problem with POST to ZD: ' + e.message + '\r\n');
+	});
+	var data = '{"app_id":"' + appid + '","event":"' + callback + '"}';
+	req.write(data);
+	req.end();
+	log.info('> POST to ZD \r\n');
+};
+
+sendSignedInToZdApp = function(zddomain, appid, callback){
+	console.log("INFO: sendSignedInToZdApp called");
+
+	var options = {
+	  host: zddomain,
+	  path: '/api/v2/apps/notify.json/',
+	  method: 'POST',
+	  auth: 'joaopaulo.borras@pbxl.jp:zendesktest', //TODO: real auth with ZD?
+	  headers: {'Content-Type': 'application/json'},
+	};
+	var https = require('https');
+	var req = https.request(options, function(res) {
+	  log.info("< response from ZD: " + res.statusCode + '\r\n');
+	});
+
+	req.on('error', function(e) {
+  		log.info('problem with POST to ZD: ' + e.message + '\r\n');
+	});
+	var data = '{"app_id":"' + appid + '","event":"' + callback + '"}';
+	req.write(data);
+	req.end();
+	log.info('> POST to ZD \r\n');
+};
+
+sendSignInErrorToZD = function(zddomain, appid){
+	console.log("INFO: sendSignInErrorToZD called");
+	console.log("ZD domain: " + zddomain);
+
+	var options = {
+	  host: zddomain,
+	  path: '/api/v2/apps/notify.json/',
+	  method: 'POST',
+	  auth: 'joaopaulo.borras@pbxl.jp:zendesktest', //TODO: real auth with ZD?
+	  headers: {'Content-Type': 'application/json'},
+	};
+	var https = require('https');
+	var req = https.request(options, function(res) {
+	  log.info("< response from ZD: " + res.statusCode + '\r\n');
+	});
+
+	req.on('error', function(e) {
+  		log.info('problem with POST to ZD: ' + e.message + '\r\n');
+	});
+	var callback = 'signInError';
+	var data = '{"app_id":"' + appid + '","event":"' + callback + '"}';
+	req.write(data);
+	req.end();
+	log.info('> POST to ZD \r\n');
 };
 
 //**************** listen for incoming events ***********************

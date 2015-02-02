@@ -1,7 +1,7 @@
 //**************** NewRelic monitoring ***********************
 //require('newrelic');
 
-this is a test!
+inserted to indicate it is the zd compatilibity branch.
 
 //*********************** variables and objects used in the proxy ******************
 //no final, o object credentials sera um array porque vai ter varias ZD's apps conectando no proxy
